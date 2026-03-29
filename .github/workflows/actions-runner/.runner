@@ -1,0 +1,11 @@
+﻿{
+  "agentId": 2,
+  "agentName": "NIKITHA",
+  "poolId": 1,
+  "poolName": "Default",
+  "serverUrl": "https://pipelinesghubeus11.actions.githubusercontent.com/A3mwMmNwk6jBzSXsS1EoVKHXF9cmBvdwLTZ8A2dynj7HIwARxC/",
+  "gitHubUrl": "https://github.com/nikimanvi/gitopsDevelopment",
+  "workFolder": "_work",
+  "useV2Flow": true,
+  "serverUrlV2": "https://broker.actions.githubusercontent.com/"
+}

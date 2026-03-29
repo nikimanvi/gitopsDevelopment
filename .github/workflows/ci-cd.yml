@@ -1,0 +1,130 @@
+name: CI/CD Pipeline — Docker Desktop
+
+on:
+  push:
+    branches: [master, develop]
+  pull_request:
+    branches: [master, develop]
+
+env:
+  JAVA_VERSION: '21'
+
+jobs:
+  # ──────────────────────────────────────────────────────────────
+  # JOB 1: Build & Test — runs in parallel for all four services
+  #         Runs on GitHub-hosted runner (no local setup required)
+  # ──────────────────────────────────────────────────────────────
+  build-and-test:
+    name: Build & Test — ${{ matrix.service }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false          # keep running other services if one fails
+      matrix:
+        service:
+          - user-service
+          - product-service
+          - order-service
+          - gateway-service
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven             # caches ~/.m2/repository between runs
+
+      - name: Build and run tests
+        run: mvn -B clean verify --no-transfer-progress
+        working-directory: ./${{ matrix.service }}
+
+      - name: Upload surefire test reports
+        if: always()               # upload even when tests fail
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.service }}
+          path: ${{ matrix.service }}/target/surefire-reports/
+          retention-days: 7
+
+  # ──────────────────────────────────────────────────────────────
+  # JOB 2: Deploy to Docker Desktop
+  #         Runs on your local Windows machine via self-hosted runner.
+  #         Builds images locally and starts all services with
+  #         docker compose — no registry push, no production target.
+  #
+  # ONE-TIME SETUP (run once in PowerShell as Administrator):
+  #   1. In your GitHub repo → Settings → Actions → Runners → New self-hosted runner
+  #   2. Choose: Windows / x64
+  #   3. Copy & paste the commands GitHub shows you (download, configure, run)
+  #   4. The runner registers as "self-hosted" and stays listening in the background
+  # ──────────────────────────────────────────────────────────────
+  deploy-docker-desktop:
+    name: Deploy to Docker Desktop
+    runs-on: self-hosted          # executes on YOUR machine where Docker Desktop runs
+    needs: build-and-test
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Stop existing containers (clean slate)
+        # --remove-orphans cleans up containers from old service definitions
+        run: docker compose down --remove-orphans
+        continue-on-error: true    # safe to ignore if nothing was running
+
+      - name: Build images and start all services
+        run: docker compose up -d --build
+        timeout-minutes: 10
+
+      - name: Wait for gateway-service to be healthy
+        shell: pwsh
+        run: |
+          Write-Host "Waiting for gateway-service to become healthy..."
+          $maxAttempts = 15
+          for ($i = 1; $i -le $maxAttempts; $i++) {
+            try {
+              $response = Invoke-WebRequest -Uri http://localhost:8080/actuator/health -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+              if ($response.StatusCode -eq 200) {
+                Write-Host "Gateway is healthy."
+                exit 0
+              }
+            } catch {
+              Write-Host "Attempt $i/$maxAttempts — not ready yet, retrying in 10s..."
+            }
+            Start-Sleep -Seconds 10
+          }
+          Write-Host "Gateway did not become healthy in time. Dumping logs..."
+          docker compose logs
+          exit 1
+
+      - name: Verify all services are running
+        shell: pwsh
+        run: |
+          $services = @(
+            @{ Name = "user-service";    Port = 8081 },
+            @{ Name = "product-service"; Port = 8082 },
+            @{ Name = "order-service";   Port = 8083 }
+          )
+          $failed = $false
+          foreach ($svc in $services) {
+            try {
+              $r = Invoke-WebRequest -Uri "http://localhost:$($svc.Port)/actuator/health" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+              Write-Host "$($svc.Name): UP ($($r.StatusCode))"
+            } catch {
+              Write-Host "$($svc.Name): FAILED - $_"
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Show running containers
+        run: docker compose ps
+
+  # ──────────────────────────────────────────────────────────────
+  # JOB 4: Deploy (template — fill in your deployment target)
+  # (no production deploy — this pipeline targets Docker Desktop only)
