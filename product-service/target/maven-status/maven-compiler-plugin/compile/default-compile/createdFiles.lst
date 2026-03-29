@@ -1,0 +1,11 @@
+com\example\app\product\ProductServiceApplication.class
+com\example\app\product\ProductController$PurchaseRequest.class
+com\example\app\core\MicroService.class
+com\example\app\models\Product.class
+com\example\app\core\BaseService.class
+com\example\app\product\ProductController$ApiResponse.class
+com\example\app\product\ProductRepository.class
+com\example\app\product\ProductService.class
+com\example\app\product\ProductController$CreateProductRequest.class
+com\example\app\product\ProductController.class
+com\example\app\product\ProductController$UpdateProductRequest.class

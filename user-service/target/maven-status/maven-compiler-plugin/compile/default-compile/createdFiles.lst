@@ -1,0 +1,10 @@
+com\example\app\user\UserService.class
+com\example\app\core\MicroService.class
+com\example\app\core\BaseService.class
+com\example\app\models\User.class
+com\example\app\user\UserController$CreateUserRequest.class
+com\example\app\user\UserRepository.class
+com\example\app\user\UserServiceApplication.class
+com\example\app\user\UserController$UpdateUserRequest.class
+com\example\app\user\UserController.class
+com\example\app\user\UserController$ApiResponse.class

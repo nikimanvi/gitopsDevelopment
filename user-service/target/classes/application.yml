@@ -1,0 +1,22 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: user-service
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    root: INFO
+    com.example.app: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [USER-SERVICE] - %msg%n"

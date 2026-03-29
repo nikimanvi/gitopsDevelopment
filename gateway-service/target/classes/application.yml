@@ -1,0 +1,64 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: gateway-service
+  cloud:
+    gateway:
+      routes:
+        # User Service Routes
+        - id: user-service
+          uri: http://localhost:8081
+          predicates:
+            - Path=/api/users/**
+
+        # Product Service Routes
+        - id: product-service
+          uri: http://localhost:8082
+          predicates:
+            - Path=/api/products/**
+
+        # Order Service Routes
+        - id: order-service
+          uri: http://localhost:8083
+          predicates:
+            - Path=/api/orders/**
+
+      default-filters:
+        - name: CircuitBreaker
+          args:
+            name: defaultCircuitBreaker
+            fallbackUri: forward:/fallback
+        - AddResponseHeader=X-Response-Gateway, API-Gateway
+
+      globalcors:
+        corsConfigurations:
+          '[/**]':
+            allowedOrigins: "*"
+            allowedMethods:
+              - GET
+              - POST
+              - PUT
+              - DELETE
+              - OPTIONS
+            allowedHeaders: "*"
+            maxAge: 3600
+
+# Management endpoints for monitoring
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus, gateway
+  endpoint:
+    health:
+      show-details: always
+    gateway:
+      enabled: true
+
+# Logging
+logging:
+  level:
+    org.springframework.cloud.gateway: DEBUG
+    reactor.netty.http.client: DEBUG

@@ -1,0 +1,29 @@
+server:
+  port: 8083
+
+spring:
+  application:
+    name: order-service
+
+# URLs of other microservices for inter-service communication
+service:
+  user:
+    url: http://localhost:8081
+  product:
+    url: http://localhost:8082
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    root: INFO
+    com.example.app: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [ORDER-SERVICE] - %msg%n"
