@@ -2,9 +2,9 @@ name: CI/CD Pipeline — Docker Desktop
 
 on:
   push:
-    branches: [master, develop]
+    branches: [master, develop, NikithaDevops]
   pull_request:
-    branches: [master, develop]
+    branches: [master, develop, NikithaDevops]
 
 env:
   JAVA_VERSION: '21'
