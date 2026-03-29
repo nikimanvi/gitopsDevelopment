@@ -82,7 +82,7 @@ jobs:
         timeout-minutes: 10
 
       - name: Wait for gateway-service to be healthy
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "Waiting for gateway-service to become healthy..."
           $maxAttempts = 15
@@ -103,7 +103,7 @@ jobs:
           exit 1
 
       - name: Verify all services are running
-        shell: pwsh
+        shell: powershell
         run: |
           $services = @(
             @{ Name = "user-service";    Port = 8081 },
