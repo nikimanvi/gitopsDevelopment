@@ -84,31 +84,31 @@ jobs:
       - name: Wait for gateway-service to be healthy
         shell: powershell
         run: |
-          Write-Host "Waiting for gateway-service to become healthy..."
           $maxAttempts = 15
+          $healthy = $false
           for ($i = 1; $i -le $maxAttempts; $i++) {
             try {
-              $response = Invoke-WebRequest -Uri http://localhost:8080/actuator/health -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
-              if ($response.StatusCode -eq 200) {
-                Write-Host "Gateway is healthy."
-                exit 0
-              }
+              $r = Invoke-WebRequest -Uri 'http://localhost:8080/actuator/health' -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+              if ($r.StatusCode -eq 200) { $healthy = $true; break }
             } catch {
-              Write-Host "Attempt $i/$maxAttempts — not ready yet, retrying in 10s..."
+              Write-Host "Attempt $i of $maxAttempts - not ready, retrying in 10s..."
             }
             Start-Sleep -Seconds 10
           }
-          Write-Host "Gateway did not become healthy in time. Dumping logs..."
-          docker compose logs
-          exit 1
+          if (-not $healthy) {
+            Write-Host 'Gateway did not become healthy in time.'
+            docker compose logs
+            exit 1
+          }
+          Write-Host 'Gateway is healthy.'
 
       - name: Verify all services are running
         shell: powershell
         run: |
           $services = @(
-            @{ Name = "user-service";    Port = 8081 },
-            @{ Name = "product-service"; Port = 8082 },
-            @{ Name = "order-service";   Port = 8083 }
+            @{ Name = 'user-service';    Port = 8081 },
+            @{ Name = 'product-service'; Port = 8082 },
+            @{ Name = 'order-service';   Port = 8083 }
           )
           $failed = $false
           foreach ($svc in $services) {
@@ -116,7 +116,7 @@ jobs:
               $r = Invoke-WebRequest -Uri "http://localhost:$($svc.Port)/actuator/health" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
               Write-Host "$($svc.Name): UP ($($r.StatusCode))"
             } catch {
-              Write-Host "$($svc.Name): FAILED - $_"
+              Write-Host "$($svc.Name): FAILED"
               $failed = $true
             }
           }
