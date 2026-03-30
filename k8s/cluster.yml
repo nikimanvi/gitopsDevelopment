@@ -1,0 +1,32 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: microservices-cluster
+  region: us-east-1
+  version: "1.29"
+
+availabilityZones:
+  - us-east-1a
+  - us-east-1b
+
+managedNodeGroups:
+  - name: microservices-nodes
+    instanceType: t3.medium
+    minSize: 2
+    maxSize: 4
+    desiredCapacity: 2
+    volumeSize: 20
+    iam:
+      withAddonPolicies:
+        albIngress: true
+        cloudWatch: true
+
+cloudWatch:
+  clusterLogging:
+    enableTypes: ["api", "audit", "authenticator"]
+
+addons:
+  - name: vpc-cni
+  - name: coredns
+  - name: kube-proxy
