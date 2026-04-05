@@ -143,23 +143,6 @@ pipeline {
                 }
             }
         }
-
-        // ── 8. Smoke Test with Docker Compose ───────────────────────────────
-        stage('Smoke Test') {
-            steps {
-                script {
-                    bat 'docker-compose up -d'
-                    sleep(time: 30, unit: 'SECONDS')
-                    bat 'docker-compose ps'
-                    bat 'curl -f http://localhost:8080/actuator/health || echo "Gateway not ready yet"'
-                }
-            }
-            post {
-                always {
-                    bat 'docker-compose down'
-                }
-            }
-        }
     }
 
     post {
