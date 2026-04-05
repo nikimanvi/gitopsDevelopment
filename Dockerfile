@@ -5,8 +5,9 @@ FROM maven:3.9-eclipse-temurin-21-alpine AS builder
 # Set working directory
 WORKDIR /app
 
-# Copy pom.xml files first (for better layer caching)
+# Copy pom.xml first and download dependencies (better layer caching)
 COPY pom.xml .
+RUN mvn dependency:go-offline -B
 
 # Copy source code
 COPY src ./src

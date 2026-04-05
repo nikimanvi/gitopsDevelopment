@@ -12,6 +12,24 @@ pipeline {
         jdk 'JDK'
     }
 
+    parameters {
+        string(
+            name: 'BRANCH_NAME',
+            defaultValue: 'main',
+            description: 'Git branch to build'
+        )
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'staging', 'prod'],
+            description: 'Target deployment environment'
+        )
+        booleanParam(
+            name: 'SKIP_TESTS',
+            defaultValue: false,
+            description: 'Skip unit tests and code coverage'
+        )
+    }
+
     environment {
         // ── Docker Hub ──────────────────────────────────────────────────────
         // Credentials are fetched securely via withCredentials() in each stage.
@@ -33,7 +51,16 @@ pipeline {
         stage('Checkout') {
             steps {
                 script {
-                    checkout scm
+                    echo "Building branch: ${params.BRANCH_NAME}"
+                    echo "Target environment: ${params.ENVIRONMENT}"
+                    echo "Skip tests: ${params.SKIP_TESTS}"
+                    
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${params.BRANCH_NAME}"]],
+                        userRemoteConfigs: scm.userRemoteConfigs
+                    ])
+                    
                     env.GIT_COMMIT_SHORT = bat(
                         script: '@git rev-parse --short HEAD',
                         returnStdout: true
@@ -46,12 +73,18 @@ pipeline {
         // ── 2. Build ───────────────────────────────────────────────────────
         stage('Build') {
             steps {
-                bat 'mvn clean compile -T 4 -DskipTests'
+                script {
+                    def skipTestsFlag = params.SKIP_TESTS ? '-DskipTests' : ''
+                    bat "mvn clean compile ${skipTestsFlag} -T 4"
+                }
             }
         }
 
         // ── 3. Unit Tests ──────────────────────────────────────────────────
         stage('Unit Tests') {
+            when {
+                expression { return !params.SKIP_TESTS }
+            }
             steps {
                 bat 'mvn test -T 4'
             }
@@ -64,6 +97,9 @@ pipeline {
 
         // ── 4. Code Coverage ───────────────────────────────────────────────
         stage('Code Coverage') {
+            when {
+                expression { return !params.SKIP_TESTS }
+            }
             steps {
                 bat 'mvn jacoco:report'
             }
@@ -81,21 +117,8 @@ pipeline {
             }
         }
 
-        // ── 5. Package JARs ────────────────────────────────────────────────
-        stage('Package') {
-            steps {
-                bat 'mvn package -DskipTests -T 4'
-            }
-            post {
-                success {
-                    archiveArtifacts artifacts: '**/target/*.jar',
-                                     allowEmptyArchive: true,
-                                     fingerprint: true
-                }
-            }
-        }
-
-        // ── 6. Build Docker Images (parallel) ─────────────────────────────
+        // ── 5. Build Docker Images (parallel) ──────────────────────────────
+        // JAR packaging happens inside Docker's builder stage (multi-stage build)
         stage('Build Docker Images') {
             parallel {
                 stage('gateway-service') {
@@ -114,8 +137,8 @@ pipeline {
             }
         }
 
-        // ── 7. Push to Docker Hub ──────────────────────────────────────────
-        // Credentials fetched from Jenkins: 'dockerhub-credentials'
+        // ── 6. Push to Docker Hub ──────────────────────────────────────────
+        // Credentials fetched from Jenkins: 'docker-hub-credentials'
         // (Kind: Username with password — username + access token)
         stage('Push to Docker Hub') {
             steps {
@@ -128,13 +151,13 @@ pipeline {
                         // Login using the access token
                         bat 'echo %DH_PASS% | docker login -u %DH_USER% --password-stdin'
 
-                        // Tag each image as <dockerhub-user>/<service>:<version> and push
+                        // Tag each image as <dockerhub-user>/<service>:<version>-<env> and push
                         env.SERVICES.split(',').each { service ->
                             bat """
-                                docker tag ${service}:${env.VERSION} %DH_USER%/${service}:${env.VERSION}
-                                docker tag ${service}:${env.VERSION} %DH_USER%/${service}:latest
-                                docker push %DH_USER%/${service}:${env.VERSION}
-                                docker push %DH_USER%/${service}:latest
+                                docker tag ${service}:${env.VERSION} %DH_USER%/${service}:${env.VERSION}-${params.ENVIRONMENT}
+                                docker tag ${service}:${env.VERSION} %DH_USER%/${service}:latest-${params.ENVIRONMENT}
+                                docker push %DH_USER%/${service}:${env.VERSION}-${params.ENVIRONMENT}
+                                docker push %DH_USER%/${service}:latest-${params.ENVIRONMENT}
                             """
                         }
 
