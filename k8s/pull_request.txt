@@ -1,1 +1,5 @@
+<<<<<<< HEAD
+Adding changes to file.
+=======
 No changes - added for test purposes.
+>>>>>>> 3d41a82453f3aef1eccd67e682adbce33c93ae6a
