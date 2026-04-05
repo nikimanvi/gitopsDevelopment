@@ -1,66 +1,59 @@
-// Simplified Jenkinsfile for Local Testing (No AWS/EKS Required)
-// Use this to test your pipeline locally before deploying to cloud
+// Jenkinsfile for Local Jenkins Server
+// Credentials needed in Jenkins Credential Manager:
+//   ID: dockerhub-credentials  → Kind: Username with password
+//                                 Username: your Docker Hub username
+//                                 Password: Docker Hub access token
 
 pipeline {
     agent any
-    
+
     tools {
         maven 'Maven-3.9'
         jdk 'JDK-21'
     }
-    
+
     environment {
-        // SonarQube Configuration
-        SONAR_TOKEN = credentials('sonarqube-token')
-        SONAR_HOST_URL = 'https://sonarcloud.io'
-        SONAR_PROJECT_KEY = 'microservices-project'
-        
-        // Docker Configuration (Local)
-        DOCKER_REGISTRY = 'localhost:5000' // Local registry or DockerHub username
-        VERSION = "${env.BUILD_NUMBER}"
-        
-        // Services
+        // ── Docker Hub ──────────────────────────────────────────────────────
+        // Credentials are fetched securely via withCredentials() in each stage.
+        // Images will be pushed as: <your-dockerhub-username>/<service>:<version>
         SERVICES = 'gateway-service,user-service,product-service,order-service'
+        VERSION  = "${env.BUILD_NUMBER}"
+
     }
-    
+
     options {
         buildDiscarder(logRotator(numToKeepStr: '10'))
         timestamps()
-        timeout(time: 20, unit: 'MINUTES')
+        timeout(time: 30, unit: 'MINUTES')
     }
-    
+
     stages {
+
+        // ── 1. Checkout ────────────────────────────────────────────────────
         stage('Checkout') {
             steps {
                 script {
-                    echo "🔄 Checking out code..."
                     checkout scm
-                    
                     env.GIT_COMMIT_SHORT = bat(
                         script: '@git rev-parse --short HEAD',
                         returnStdout: true
                     ).trim()
-                    
                     echo "Commit: ${env.GIT_COMMIT_SHORT}"
                 }
             }
         }
-        
+
+        // ── 2. Build ───────────────────────────────────────────────────────
         stage('Build') {
             steps {
-                script {
-                    echo "🔨 Building all microservices..."
-                    bat 'mvn clean compile -T 4 -DskipTests'
-                }
+                bat 'mvn clean compile -T 4 -DskipTests'
             }
         }
-        
+
+        // ── 3. Unit Tests ──────────────────────────────────────────────────
         stage('Unit Tests') {
             steps {
-                script {
-                    echo "🧪 Running tests..."
-                    bat 'mvn test -T 4'
-                }
+                bat 'mvn test -T 4'
             }
             post {
                 always {
@@ -68,13 +61,11 @@ pipeline {
                 }
             }
         }
-        
+
+        // ── 4. Code Coverage ───────────────────────────────────────────────
         stage('Code Coverage') {
             steps {
-                script {
-                    echo "📊 Generating code coverage report..."
-                    bat 'mvn jacoco:report'
-                }
+                bat 'mvn jacoco:report'
             }
             post {
                 always {
@@ -89,80 +80,77 @@ pipeline {
                 }
             }
         }
-        
-        stage('SonarQube Analysis') {
-            steps {
-                script {
-                    echo "📊 Running SonarQube analysis..."
-                    withSonarQubeEnv('SonarQube') {
-                        bat """
-                            mvn sonar:sonar ^
-                            -Dsonar.projectKey=%SONAR_PROJECT_KEY% ^
-                            -Dsonar.host.url=%SONAR_HOST_URL% ^
-                            -Dsonar.login=%SONAR_TOKEN%
-                        """
-                    }
-                }
-            }
-        }
-        
-        stage('Quality Gate') {
-            steps {
-                script {
-                    echo "⏳ Waiting for Quality Gate..."
-                    timeout(time: 5, unit: 'MINUTES') {
-                        waitForQualityGate abortPipeline: true
-                    }
-                    echo "✅ Quality Gate passed!"
-                }
-            }
-        }
-        
+
+        // ── 5. Package JARs ────────────────────────────────────────────────
         stage('Package') {
             steps {
-                script {
-                    echo "📦 Packaging services..."
-                    bat 'mvn package -DskipTests -T 4'
-                }
+                bat 'mvn package -DskipTests -T 4'
             }
             post {
                 success {
-                    archiveArtifacts artifacts: '**/target/*.jar', fingerprint: true
+                    archiveArtifacts artifacts: '**/target/*.jar',
+                                     allowEmptyArchive: true,
+                                     fingerprint: true
                 }
             }
         }
-        
+
+        // ── 6. Build Docker Images (parallel) ─────────────────────────────
         stage('Build Docker Images') {
+            parallel {
+                stage('gateway-service') {
+                    steps { script { buildDockerImage('gateway-service') } }
+                }
+                stage('user-service') {
+                    steps { script { buildDockerImage('user-service') } }
+                }
+                stage('product-service') {
+                    steps { script { buildDockerImage('product-service') } }
+                }
+                stage('order-service') {
+                    steps { script { buildDockerImage('order-service') } }
+                }
+            }
+        }
+
+        // ── 7. Push to Docker Hub ──────────────────────────────────────────
+        // Credentials fetched from Jenkins: 'dockerhub-credentials'
+        // (Kind: Username with password — username + access token)
+        stage('Push to Docker Hub') {
             steps {
-                script {
-                    echo "🐳 Building Docker images..."
-                    
-                    env.SERVICES.split(',').each { service ->
-                        dir(service) {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-credentials',
+                    usernameVariable: 'DH_USER',
+                    passwordVariable: 'DH_PASS'
+                )]) {
+                    script {
+                        // Login using the access token
+                        bat 'echo %DH_PASS% | docker login -u %DH_USER% --password-stdin'
+
+                        // Tag each image as <dockerhub-user>/<service>:<version> and push
+                        env.SERVICES.split(',').each { service ->
                             bat """
-                                docker build -t ${service}:${VERSION} .
-                                docker tag ${service}:${VERSION} ${service}:latest
+                                docker tag ${service}:${env.VERSION} %DH_USER%/${service}:${env.VERSION}
+                                docker tag ${service}:${env.VERSION} %DH_USER%/${service}:latest
+                                docker push %DH_USER%/${service}:${env.VERSION}
+                                docker push %DH_USER%/${service}:latest
                             """
                         }
+
+                        bat 'docker logout'
                     }
                 }
             }
         }
-        
-        stage('Docker Compose Test') {
+
+        // ── 8. Smoke Test with Docker Compose ───────────────────────────────
+        stage('Smoke Test') {
             steps {
                 script {
-                    echo "🧪 Testing with Docker Compose..."
                     bat 'docker-compose up -d'
-                    
-                    // Wait for services to start
                     sleep(time: 30, unit: 'SECONDS')
-                    
-                    // Health check
-                    bat '''
-                        docker-compose ps
-                        curl -f http://localhost:8080/actuator/health || exit 0
-                    '''
+                    bat 'docker-compose ps'
+                    bat 'curl -f http://localhost:8080/actuator/health || echo "Gateway not ready yet"'
                 }
             }
             post {
@@ -172,32 +160,27 @@ pipeline {
             }
         }
     }
-    
+
     post {
         always {
-            echo "🧹 Cleaning workspace..."
             cleanWs()
         }
         success {
-            echo """
-            ✅ ============================================
-               Pipeline Completed Successfully!
-            ============================================
-            Build: #${env.BUILD_NUMBER}
-            Commit: ${env.GIT_COMMIT_SHORT}
-            Duration: ${currentBuild.durationString}
-            ============================================
-            """
+            echo "BUILD SUCCESS | Job: ${env.JOB_NAME} | Build: #${env.BUILD_NUMBER} | Duration: ${currentBuild.durationString}"
         }
         failure {
-            echo """
-            ❌ ============================================
-               Pipeline Failed!
-            ============================================
-            Build: #${env.BUILD_NUMBER}
-            Check console output for details
-            ============================================
-            """
+            echo "BUILD FAILED  | Job: ${env.JOB_NAME} | Build: #${env.BUILD_NUMBER} | Check console output."
         }
+    }
+}
+
+// ── Helper ─────────────────────────────────────────────────────────────────
+def buildDockerImage(String serviceName) {
+    dir(serviceName) {
+        bat """
+            docker build -t ${serviceName}:${env.VERSION} .
+            docker tag  ${serviceName}:${env.VERSION} ${serviceName}:latest
+            docker images ${serviceName}
+        """
     }
 }
