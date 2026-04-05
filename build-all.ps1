@@ -4,7 +4,7 @@ $Green = 'Green'
 $Yellow = 'Yellow'
 $Red = 'Red'
 
-Write-Host "========================================" -ForegroundColor $Green
+Write-Host "=============================================" -ForegroundColor $Green
 Write-Host " Building All Microservices" -ForegroundColor $Green
 Write-Host "========================================" -ForegroundColor $Green
 

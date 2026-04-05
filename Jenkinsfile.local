@@ -1,0 +1,203 @@
+// Simplified Jenkinsfile for Local Testing (No AWS/EKS Required)
+// Use this to test your pipeline locally before deploying to cloud
+
+pipeline {
+    agent any
+    
+    tools {
+        maven 'Maven-3.9'
+        jdk 'JDK-21'
+    }
+    
+    environment {
+        // SonarQube Configuration
+        SONAR_TOKEN = credentials('sonarqube-token')
+        SONAR_HOST_URL = 'https://sonarcloud.io'
+        SONAR_PROJECT_KEY = 'microservices-project'
+        
+        // Docker Configuration (Local)
+        DOCKER_REGISTRY = 'localhost:5000' // Local registry or DockerHub username
+        VERSION = "${env.BUILD_NUMBER}"
+        
+        // Services
+        SERVICES = 'gateway-service,user-service,product-service,order-service'
+    }
+    
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timestamps()
+        timeout(time: 20, unit: 'MINUTES')
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "🔄 Checking out code..."
+                    checkout scm
+                    
+                    env.GIT_COMMIT_SHORT = bat(
+                        script: '@git rev-parse --short HEAD',
+                        returnStdout: true
+                    ).trim()
+                    
+                    echo "Commit: ${env.GIT_COMMIT_SHORT}"
+                }
+            }
+        }
+        
+        stage('Build') {
+            steps {
+                script {
+                    echo "🔨 Building all microservices..."
+                    bat 'mvn clean compile -T 4 -DskipTests'
+                }
+            }
+        }
+        
+        stage('Unit Tests') {
+            steps {
+                script {
+                    echo "🧪 Running tests..."
+                    bat 'mvn test -T 4'
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
+                }
+            }
+        }
+        
+        stage('Code Coverage') {
+            steps {
+                script {
+                    echo "📊 Generating code coverage report..."
+                    bat 'mvn jacoco:report'
+                }
+            }
+            post {
+                always {
+                    publishHTML([
+                        allowMissing: true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'target/site/jacoco',
+                        reportFiles: 'index.html',
+                        reportName: 'JaCoCo Coverage Report'
+                    ])
+                }
+            }
+        }
+        
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    echo "📊 Running SonarQube analysis..."
+                    withSonarQubeEnv('SonarQube') {
+                        bat """
+                            mvn sonar:sonar ^
+                            -Dsonar.projectKey=%SONAR_PROJECT_KEY% ^
+                            -Dsonar.host.url=%SONAR_HOST_URL% ^
+                            -Dsonar.login=%SONAR_TOKEN%
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Quality Gate') {
+            steps {
+                script {
+                    echo "⏳ Waiting for Quality Gate..."
+                    timeout(time: 5, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: true
+                    }
+                    echo "✅ Quality Gate passed!"
+                }
+            }
+        }
+        
+        stage('Package') {
+            steps {
+                script {
+                    echo "📦 Packaging services..."
+                    bat 'mvn package -DskipTests -T 4'
+                }
+            }
+            post {
+                success {
+                    archiveArtifacts artifacts: '**/target/*.jar', fingerprint: true
+                }
+            }
+        }
+        
+        stage('Build Docker Images') {
+            steps {
+                script {
+                    echo "🐳 Building Docker images..."
+                    
+                    env.SERVICES.split(',').each { service ->
+                        dir(service) {
+                            bat """
+                                docker build -t ${service}:${VERSION} .
+                                docker tag ${service}:${VERSION} ${service}:latest
+                            """
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Docker Compose Test') {
+            steps {
+                script {
+                    echo "🧪 Testing with Docker Compose..."
+                    bat 'docker-compose up -d'
+                    
+                    // Wait for services to start
+                    sleep(time: 30, unit: 'SECONDS')
+                    
+                    // Health check
+                    bat '''
+                        docker-compose ps
+                        curl -f http://localhost:8080/actuator/health || exit 0
+                    '''
+                }
+            }
+            post {
+                always {
+                    bat 'docker-compose down'
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo "🧹 Cleaning workspace..."
+            cleanWs()
+        }
+        success {
+            echo """
+            ✅ ============================================
+               Pipeline Completed Successfully!
+            ============================================
+            Build: #${env.BUILD_NUMBER}
+            Commit: ${env.GIT_COMMIT_SHORT}
+            Duration: ${currentBuild.durationString}
+            ============================================
+            """
+        }
+        failure {
+            echo """
+            ❌ ============================================
+               Pipeline Failed!
+            ============================================
+            Build: #${env.BUILD_NUMBER}
+            Check console output for details
+            ============================================
+            """
+        }
+    }
+}
