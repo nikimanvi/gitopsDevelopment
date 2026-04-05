@@ -6,7 +6,7 @@ $Red = 'Red'
 
 Write-Host "=============================================" -ForegroundColor $Green
 Write-Host " Building All Microservices" -ForegroundColor $Green
-Write-Host "========================================" -ForegroundColor $Green
+Write-Host "=============================================" -ForegroundColor $Green
 
 $services = @("user-service", "product-service", "order-service", "gateway-service")
 
