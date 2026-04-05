@@ -1,5 +1,5 @@
 # deploy-eks.ps1
-# Creates the EKS cluster and deploys all microservices.
+# Creates the EKS cluster and deploys all microservices. Just for practice
 # Usage: .\deploy-eks.ps1 -Region us-east-1
 
 param(
