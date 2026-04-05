@@ -42,16 +42,21 @@ aws ecr get-login-password --region $Region | docker login --username AWS --pass
 $Services = @("gateway-service", "user-service", "product-service", "order-service")
 
 foreach ($Service in $Services) {
-    try {
-        aws ecr describe-repositories --repository-names $Service --region $Region | Out-Null
-        Write-Host "ECR repository already exists: $Service"
-    } catch {
+    $ErrorActionPreference = "SilentlyContinue"
+    aws ecr describe-repositories --repository-names $Service --region $Region 2>&1 | Out-Null
+    $repoExists = ($LASTEXITCODE -eq 0)
+    $ErrorActionPreference = "Stop"
+
+    if (-not $repoExists) {
         Write-Host "Creating ECR repository: $Service"
         aws ecr create-repository `
             --repository-name $Service `
             --region $Region `
             --image-scanning-configuration scanOnPush=true `
             --encryption-configuration encryptionType=AES256
+        if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create ECR repository: $Service"; exit 1 }
+    } else {
+        Write-Host "ECR repository already exists: $Service"
     }
 }
 

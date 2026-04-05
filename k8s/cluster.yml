@@ -4,19 +4,23 @@ kind: ClusterConfig
 metadata:
   name: microservices-cluster
   region: us-east-1
-  version: "1.29"
+  version: "1.32"
 
 availabilityZones:
   - us-east-1a
   - us-east-1b
+  - us-east-1c
 
 managedNodeGroups:
   - name: microservices-nodes
-    instanceType: t3.medium
-    minSize: 2
-    maxSize: 4
-    desiredCapacity: 2
+    instanceTypes: ["t3.micro", "t2.micro"]
+    minSize: 3
+    maxSize: 5
+    desiredCapacity: 3
     volumeSize: 20
+    spot: false
+    amiFamily: AmazonLinux2023
+    maxPodsPerNode: 29
     iam:
       withAddonPolicies:
         albIngress: true
