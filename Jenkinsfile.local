@@ -8,8 +8,8 @@ pipeline {
     agent any
 
     tools {
-        maven 'Maven-3.9'
-        jdk 'JDK-21'
+        maven 'Maven'
+        jdk 'JDK'
     }
 
     environment {
@@ -99,7 +99,8 @@ pipeline {
         stage('Build Docker Images') {
             parallel {
                 stage('gateway-service') {
-                    steps { script { buildDockerImage('gateway-service') } }
+                    steps { script { buildDockerImage('gateway-service') 
+                    } }
                 }
                 stage('user-service') {
                     steps { script { buildDockerImage('user-service') } }
