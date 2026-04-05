@@ -1,64 +1,72 @@
-// Simplified Jenkinsfile for Local Testing (No AWS/EKS Required)
-// Use this to test your pipeline locally before deploying to cloud
+// Jenkinsfile for Local Jenkins Server (localhost:8081)
+// Docker Desktop is running — builds and pushes images to Docker Hub
+// Prerequisite: Add credential ID 'dockerhub-credentials' in Jenkins
+//   Manage Jenkins → Credentials → Global → Add → Username with password
+//   ID: dockerhub-credentials | Username: <your Docker Hub username> | Password: <access token>
 
 pipeline {
     agent any
-    
+
     tools {
         maven 'Maven-3.9'
         jdk 'JDK-21'
     }
-    
+
     environment {
-        // SonarQube Configuration
-        SONAR_TOKEN = credentials('sonarqube-token')
-        SONAR_HOST_URL = 'https://sonarcloud.io'
+        VERSION          = "${env.BUILD_NUMBER}"
+        SERVICES         = 'gateway-service,user-service,product-service,order-service'
+
+        // Docker Desktop is running
+        DOCKER_AVAILABLE = 'true'
+
+        // Your Docker Hub username (images will be: <username>/<service>:<version>)
+        DOCKERHUB_USERNAME = 'your-dockerhub-username'   // <-- change this
+
+        // Set to 'true' only if sonarqube-token credential is configured in Jenkins
+        SONAR_ENABLED    = 'false'
+        SONAR_HOST_URL   = 'https://sonarcloud.io'
         SONAR_PROJECT_KEY = 'microservices-project'
-        
-        // Docker Configuration (Local)
-        DOCKER_REGISTRY = 'localhost:5000' // Local registry or DockerHub username
-        VERSION = "${env.BUILD_NUMBER}"
-        
-        // Services
-        SERVICES = 'gateway-service,user-service,product-service,order-service'
     }
-    
+
     options {
         buildDiscarder(logRotator(numToKeepStr: '10'))
         timestamps()
-        timeout(time: 20, unit: 'MINUTES')
+        timeout(time: 30, unit: 'MINUTES')
+        ansiColor('xterm')
     }
     
     stages {
+
+        // ── STAGE 1: Checkout ──────────────────────────────────────────────
         stage('Checkout') {
             steps {
                 script {
-                    echo "🔄 Checking out code..."
+                    echo "Checking out code..."
                     checkout scm
-                    
                     env.GIT_COMMIT_SHORT = bat(
                         script: '@git rev-parse --short HEAD',
                         returnStdout: true
                     ).trim()
-                    
-                    echo "Commit: ${env.GIT_COMMIT_SHORT}"
+                    echo "Branch: ${env.BRANCH_NAME ?: 'local'} | Commit: ${env.GIT_COMMIT_SHORT}"
                 }
             }
         }
-        
+
+        // ── STAGE 2: Build ─────────────────────────────────────────────────
         stage('Build') {
             steps {
                 script {
-                    echo "🔨 Building all microservices..."
+                    echo "Building all microservices..."
                     bat 'mvn clean compile -T 4 -DskipTests'
                 }
             }
         }
-        
+
+        // ── STAGE 3: Unit Tests ────────────────────────────────────────────
         stage('Unit Tests') {
             steps {
                 script {
-                    echo "🧪 Running tests..."
+                    echo "Running unit tests..."
                     bat 'mvn test -T 4'
                 }
             }
@@ -68,11 +76,12 @@ pipeline {
                 }
             }
         }
-        
+
+        // ── STAGE 4: Code Coverage ─────────────────────────────────────────
         stage('Code Coverage') {
             steps {
                 script {
-                    echo "📊 Generating code coverage report..."
+                    echo "Generating code coverage report..."
                     bat 'mvn jacoco:report'
                 }
             }
@@ -89,11 +98,35 @@ pipeline {
                 }
             }
         }
-        
-        stage('SonarQube Analysis') {
+
+        // ── STAGE 5: Package JARs ──────────────────────────────────────────
+        stage('Package') {
             steps {
                 script {
-                    echo "📊 Running SonarQube analysis..."
+                    echo "Packaging microservices as JARs..."
+                    bat 'mvn package -DskipTests -T 4'
+                }
+            }
+            post {
+                success {
+                    archiveArtifacts artifacts: '**/target/*.jar', allowEmptyArchive: true, fingerprint: true
+                }
+            }
+        }
+
+        // ── STAGE 6: SonarQube (OPTIONAL) ─────────────────────────────────
+        // To enable: set SONAR_ENABLED = 'true' above AND configure
+        // a 'sonarqube-token' credential in Jenkins Credentials
+        stage('SonarQube Analysis') {
+            when {
+                expression { env.SONAR_ENABLED == 'true' }
+            }
+            environment {
+                SONAR_TOKEN = credentials('sonarqube-token')
+            }
+            steps {
+                script {
+                    echo "Running SonarQube analysis..."
                     withSonarQubeEnv('SonarQube') {
                         bat """
                             mvn sonar:sonar ^
@@ -105,64 +138,100 @@ pipeline {
                 }
             }
         }
-        
+
+        // ── STAGE 7: Quality Gate (OPTIONAL) ──────────────────────────────
         stage('Quality Gate') {
+            when {
+                expression { env.SONAR_ENABLED == 'true' }
+            }
             steps {
                 script {
-                    echo "⏳ Waiting for Quality Gate..."
+                    echo "Waiting for SonarQube Quality Gate..."
                     timeout(time: 5, unit: 'MINUTES') {
                         waitForQualityGate abortPipeline: true
                     }
-                    echo "✅ Quality Gate passed!"
+                    echo "Quality Gate passed!"
                 }
             }
         }
-        
-        stage('Package') {
-            steps {
-                script {
-                    echo "📦 Packaging services..."
-                    bat 'mvn package -DskipTests -T 4'
-                }
-            }
-            post {
-                success {
-                    archiveArtifacts artifacts: '**/target/*.jar', fingerprint: true
-                }
-            }
-        }
-        
+
+        // ── STAGE 8: Build Docker Images (OPTIONAL) ────────────────────────
+        // To enable: start Docker Desktop, then set DOCKER_AVAILABLE = 'true'
         stage('Build Docker Images') {
-            steps {
-                script {
-                    echo "🐳 Building Docker images..."
-                    
-                    env.SERVICES.split(',').each { service ->
-                        dir(service) {
-                            bat """
-                                docker build -t ${service}:${VERSION} .
-                                docker tag ${service}:${VERSION} ${service}:latest
-                            """
-                        }
+            when {
+                expression { env.DOCKER_AVAILABLE == 'true' }
+            }
+            parallel {
+                stage('gateway-service') {
+                    steps {
+                        script { buildDockerImage('gateway-service') }
+                    }
+                }
+                stage('user-service') {
+                    steps {
+                        script { buildDockerImage('user-service') }
+                    }
+                }
+                stage('product-service') {
+                    steps {
+                        script { buildDockerImage('product-service') }
+                    }
+                }
+                stage('order-service') {
+                    steps {
+                        script { buildDockerImage('order-service') }
                     }
                 }
             }
         }
-        
-        stage('Docker Compose Test') {
+
+        // ── STAGE 9: Push to Docker Hub ────────────────────────────────────
+        // Requires credential ID 'dockerhub-credentials' in Jenkins
+        stage('Push to Docker Hub') {
+            when {
+                expression { env.DOCKER_AVAILABLE == 'true' }
+            }
             steps {
                 script {
-                    echo "🧪 Testing with Docker Compose..."
+                    echo "Pushing images to Docker Hub as ${env.DOCKERHUB_USERNAME}/..."
+                    withCredentials([usernamePassword(
+                        credentialsId: 'dockerhub-credentials',
+                        usernameVariable: 'DH_USER',
+                        passwordVariable: 'DH_PASS'
+                    )]) {
+                        // Login
+                        bat 'echo %DH_PASS% | docker login -u %DH_USER% --password-stdin'
+
+                        // Tag and push each service
+                        env.SERVICES.split(',').each { service ->
+                            bat """
+                                docker tag ${service}:${env.VERSION} %DH_USER%/${service}:${env.VERSION}
+                                docker tag ${service}:${env.VERSION} %DH_USER%/${service}:latest
+                                docker push %DH_USER%/${service}:${env.VERSION}
+                                docker push %DH_USER%/${service}:latest
+                                echo Pushed: %DH_USER%/${service}:${env.VERSION}
+                            """
+                        }
+
+                        // Always logout after push
+                        bat 'docker logout'
+                    }
+                }
+            }
+        }
+
+        // ── STAGE 10: Docker Compose Smoke Test (OPTIONAL) ────────────────
+        stage('Docker Compose Test') {
+            when {
+                expression { env.DOCKER_AVAILABLE == 'true' }
+            }
+            steps {
+                script {
+                    echo "Starting services with Docker Compose..."
                     bat 'docker-compose up -d'
-                    
-                    // Wait for services to start
                     sleep(time: 30, unit: 'SECONDS')
-                    
-                    // Health check
-                    bat '''
-                        docker-compose ps
-                        curl -f http://localhost:8080/actuator/health || exit 0
-                    '''
+                    bat 'docker-compose ps'
+                    bat 'curl -f http://localhost:8080/actuator/health || echo "Health check skipped"'
                 }
             }
             post {
@@ -172,32 +241,51 @@ pipeline {
             }
         }
     }
-    
+
     post {
         always {
-            echo "🧹 Cleaning workspace..."
+            echo "Cleaning workspace..."
             cleanWs()
         }
         success {
-            echo """
-            ✅ ============================================
-               Pipeline Completed Successfully!
-            ============================================
-            Build: #${env.BUILD_NUMBER}
-            Commit: ${env.GIT_COMMIT_SHORT}
-            Duration: ${currentBuild.durationString}
-            ============================================
-            """
+            script {
+                echo """
+==============================================
+  BUILD SUCCESS
+==============================================
+  Job     : ${env.JOB_NAME}
+  Build   : #${env.BUILD_NUMBER}
+  Commit  : ${env.GIT_COMMIT_SHORT}
+  Duration: ${currentBuild.durationString}
+==============================================
+"""
+            }
         }
         failure {
-            echo """
-            ❌ ============================================
-               Pipeline Failed!
-            ============================================
-            Build: #${env.BUILD_NUMBER}
-            Check console output for details
-            ============================================
-            """
+            script {
+                echo """
+==============================================
+  BUILD FAILED
+==============================================
+  Job  : ${env.JOB_NAME}
+  Build: #${env.BUILD_NUMBER}
+  Check the console output for error details.
+==============================================
+"""
+            }
         }
     }
 }
+
+// ── Helper: Build a single Docker image ───────────────────────────────────
+def buildDockerImage(String serviceName) {
+    echo "Building Docker image for ${serviceName}..."
+    dir(serviceName) {
+        bat """
+            docker build -t ${serviceName}:${env.VERSION} .
+            docker tag ${serviceName}:${env.VERSION} ${serviceName}:latest
+            docker images ${serviceName}
+        """
+    }
+}
+

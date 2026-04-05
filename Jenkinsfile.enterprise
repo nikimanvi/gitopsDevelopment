@@ -1,0 +1,793 @@
+// ENTERPRISE-GRADE JENKINS PIPELINE
+// This pipeline includes all best practices for production microservices deployment
+
+@Library('shared-library') _  // Optional: Use shared libraries for reusable code
+
+pipeline {
+    agent {
+        kubernetes {  // Use Kubernetes agents for scalability
+            yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    jenkins: agent
+spec:
+  containers:
+  - name: maven
+    image: maven:3.9-eclipse-temurin-21
+    command:
+    - cat
+    tty: true
+  - name: docker
+    image: docker:24-dind
+    securityContext:
+      privileged: true
+  - name: kubectl
+    image: bitnami/kubectl:latest
+    command:
+    - cat
+    tty: true
+"""
+        }
+    }
+    
+    tools {
+        maven 'Maven-3.9'
+        jdk 'JDK-21'
+    }
+    
+    environment {
+        // Docker & Registry Configuration
+        DOCKER_REGISTRY = 'your-account-id.dkr.ecr.us-east-1.amazonaws.com'
+        AWS_REGION = 'us-east-1'
+        AWS_CREDENTIALS = credentials('aws-credentials-id')
+        DOCKER_BUILDKIT = '1'  // Enable BuildKit for faster builds
+        
+        // SonarQube Configuration
+        SONAR_TOKEN = credentials('sonarqube-token')
+        SONAR_HOST_URL = 'https://sonarcloud.io'
+        SONAR_PROJECT_KEY = 'microservices-project'
+        
+        // Artifactory/Nexus (Enterprise artifact management)
+        ARTIFACT_REGISTRY = credentials('artifactory-url')
+        ARTIFACT_CREDS = credentials('artifactory-credentials')
+        
+        // Services Configuration
+        SERVICES = 'gateway-service,user-service,product-service,order-service'
+        VERSION = "${env.BRANCH_NAME}-${env.BUILD_NUMBER}-${GIT_COMMIT?.take(8)}"
+        
+        // Kubernetes Configuration
+        EKS_CLUSTER_NAME = 'microservices-cluster'
+        K8S_NAMESPACE = "${env.BRANCH_NAME == 'main' ? 'production' : (env.BRANCH_NAME == 'develop' ? 'staging' : 'dev')}"
+        
+        // Feature Flags
+        ENABLE_SECURITY_SCAN = 'true'
+        ENABLE_PERFORMANCE_TESTS = 'true'
+        ENABLE_SMOKE_TESTS = 'true'
+        
+        // Notification Channels
+        SLACK_CHANNEL = '#deployments'
+        TEAMS_WEBHOOK = credentials('teams-webhook-url')
+    }
+    
+    parameters {
+        choice(
+            name: 'DEPLOY_ENVIRONMENT',
+            choices: ['dev', 'staging', 'production'],
+            description: 'Target deployment environment'
+        )
+        booleanParam(
+            name: 'SKIP_TESTS',
+            defaultValue: false,
+            description: 'Skip test execution (not recommended for production)'
+        )
+        booleanParam(
+            name: 'FORCE_DEPLOY',
+            defaultValue: false,
+            description: 'Force deployment even if quality gates fail'
+        )
+        string(
+            name: 'REPLICAS',
+            defaultValue: '3',
+            description: 'Number of replicas per service'
+        )
+    }
+    
+    options {
+        buildDiscarder(logRotator(
+            numToKeepStr: '30',
+            daysToKeepStr: '90',
+            artifactNumToKeepStr: '10'
+        ))
+        timestamps()
+        timeout(time: 45, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        skipDefaultCheckout()  // Manual checkout for better control
+        ansiColor('xterm')
+    }
+    
+    triggers {
+        // Webhook trigger from GitHub/GitLab
+        githubPush()
+        
+        // Periodic build for main branch (optional)
+        cron(env.BRANCH_NAME == 'main' ? 'H 2 * * *' : '')
+    }
+    
+    stages {
+        stage('Initialize') {
+            steps {
+                script {
+                    echo "🚀 Starting Enterprise Pipeline for ${env.JOB_NAME}"
+                    echo "📋 Build: #${env.BUILD_NUMBER}"
+                    echo "🌿 Branch: ${env.BRANCH_NAME}"
+                    echo "🎯 Environment: ${params.DEPLOY_ENVIRONMENT}"
+                    
+                    // Send notification
+                    notifyBuildStart()
+                    
+                    // Set dynamic environment variables
+                    env.BUILD_TIMESTAMP = new Date().format('yyyy-MM-dd HH:mm:ss')
+                    env.SONAR_BRANCH = env.BRANCH_NAME
+                }
+            }
+        }
+        
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "🔄 Checking out source code..."
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${env.BRANCH_NAME}"]],
+                        extensions: [
+                            [$class: 'CloneOption', depth: 1, shallow: true],
+                            [$class: 'SubmoduleOption', recursiveSubmodules: true]
+                        ],
+                        userRemoteConfigs: scm.userRemoteConfigs
+                    ])
+                    
+                    // Get Git metadata
+                    env.GIT_COMMIT_SHORT = sh(
+                        script: 'git rev-parse --short HEAD',
+                        returnStdout: true
+                    ).trim()
+                    
+                    env.GIT_AUTHOR = sh(
+                        script: 'git log -1 --pretty=format:"%an"',
+                        returnStdout: true
+                    ).trim()
+                    
+                    echo "✅ Commit: ${env.GIT_COMMIT_SHORT} by ${env.GIT_AUTHOR}"
+                }
+            }
+        }
+        
+        stage('Dependency Check') {
+            steps {
+                script {
+                    echo "🔍 Checking for vulnerable dependencies..."
+                    container('maven') {
+                        sh '''
+                            mvn org.owasp:dependency-check-maven:check \
+                                -DfailBuildOnCVSS=7 \
+                                -DsuppressionFile=dependency-check-suppressions.xml
+                        '''
+                    }
+                }
+            }
+            post {
+                always {
+                    publishHTML([
+                        allowMissing: true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'target/dependency-check-report',
+                        reportFiles: 'dependency-check-report.html',
+                        reportName: 'OWASP Dependency Check'
+                    ])
+                }
+            }
+        }
+        
+        stage('Build') {
+            steps {
+                script {
+                    echo "🔨 Building all microservices..."
+                    container('maven') {
+                        sh '''
+                            mvn clean compile \
+                                -T 4 \
+                                -DskipTests \
+                                -Dmaven.compiler.showWarnings=true \
+                                -Dmaven.compiler.showDeprecation=true
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Unit Tests') {
+            when {
+                expression { params.SKIP_TESTS == false }
+            }
+            steps {
+                script {
+                    echo "🧪 Running unit tests..."
+                    container('maven') {
+                        sh '''
+                            mvn test \
+                                -T 4 \
+                                -Dmaven.test.failure.ignore=false
+                        '''
+                    }
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
+                    
+                    publishHTML([
+                        allowMissing: true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'target/surefire-reports',
+                        reportFiles: 'index.html',
+                        reportName: 'Unit Test Report'
+                    ])
+                }
+            }
+        }
+        
+        stage('Code Coverage') {
+            when {
+                expression { params.SKIP_TESTS == false }
+            }
+            steps {
+                script {
+                    echo "📊 Generating code coverage reports..."
+                    container('maven') {
+                        sh 'mvn jacoco:report'
+                    }
+                }
+            }
+            post {
+                always {
+                    jacoco(
+                        execPattern: '**/target/jacoco.exec',
+                        classPattern: '**/target/classes',
+                        sourcePattern: '**/src/main/java',
+                        minimumLineCoverage: '70',
+                        maximumLineCoverage: '90'
+                    )
+                    
+                    publishHTML([
+                        allowMissing: true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'target/site/jacoco',
+                        reportFiles: 'index.html',
+                        reportName: 'JaCoCo Coverage'
+                    ])
+                }
+            }
+        }
+        
+        stage('Integration Tests') {
+            when {
+                expression { params.SKIP_TESTS == false && env.ENABLE_PERFORMANCE_TESTS == 'true' }
+            }
+            steps {
+                script {
+                    echo "🔗 Running integration tests..."
+                    container('maven') {
+                        sh '''
+                            mvn verify \
+                                -DskipUnitTests=true \
+                                -Dtest=**/*IntegrationTest
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Security Scan') {
+            when {
+                expression { env.ENABLE_SECURITY_SCAN == 'true' }
+            }
+            parallel {
+                stage('SAST - SonarQube') {
+                    steps {
+                        script {
+                            echo "🔒 Running static security analysis..."
+                            container('maven') {
+                                withSonarQubeEnv('SonarQube') {
+                                    sh """
+                                        mvn sonar:sonar \
+                                            -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                                            -Dsonar.host.url=${SONAR_HOST_URL} \
+                                            -Dsonar.login=${SONAR_TOKEN} \
+                                            -Dsonar.branch.name=${env.SONAR_BRANCH} \
+                                            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+                                    """
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                stage('Container Scan - Trivy') {
+                    steps {
+                        script {
+                            echo "🐳 Scanning for container vulnerabilities..."
+                            container('docker') {
+                                sh '''
+                                    # Install Trivy
+                                    apk add --no-cache curl
+                                    curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+                                    
+                                    # Scan will be done after image build
+                                    echo "Trivy ready for post-build scanning"
+                                '''
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Quality Gate') {
+            steps {
+                script {
+                    echo "⏳ Waiting for SonarQube Quality Gate..."
+                    timeout(time: 10, unit: 'MINUTES') {
+                        def qg = waitForQualityGate()
+                        if (qg.status != 'OK' && !params.FORCE_DEPLOY) {
+                            error "Quality Gate failed: ${qg.status}"
+                        } else if (qg.status != 'OK' && params.FORCE_DEPLOY) {
+                            echo "⚠️ Quality Gate failed but FORCE_DEPLOY is enabled"
+                        } else {
+                            echo "✅ Quality Gate passed!"
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Package') {
+            steps {
+                script {
+                    echo "📦 Packaging microservices..."
+                    container('maven') {
+                        sh '''
+                            mvn package \
+                                -DskipTests \
+                                -T 4 \
+                                -Dmaven.test.skip=true
+                        '''
+                    }
+                }
+            }
+            post {
+                success {
+                    archiveArtifacts artifacts: '**/target/*.jar', fingerprint: true, allowEmptyArchive: false
+                    
+                    // Upload to Artifactory/Nexus
+                    script {
+                        if (env.BRANCH_NAME in ['main', 'develop']) {
+                            echo "📤 Uploading artifacts to enterprise repository..."
+                            container('maven') {
+                                sh 'mvn deploy -DskipTests'
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Build & Scan Docker Images') {
+            parallel {
+                stage('Gateway Service Image') {
+                    steps {
+                        script {
+                            buildAndScanDockerImage('gateway-service')
+                        }
+                    }
+                }
+                stage('User Service Image') {
+                    steps {
+                        script {
+                            buildAndScanDockerImage('user-service')
+                        }
+                    }
+                }
+                stage('Product Service Image') {
+                    steps {
+                        script {
+                            buildAndScanDockerImage('product-service')
+                        }
+                    }
+                }
+                stage('Order Service Image') {
+                    steps {
+                        script {
+                            buildAndScanDockerImage('order-service')
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Push to Registry') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'develop'
+                    branch pattern: 'release/.*', comparator: 'REGEXP'
+                }
+            }
+            steps {
+                script {
+                    echo "🚀 Pushing Docker images to ECR..."
+                    container('docker') {
+                        withAWS(credentials: env.AWS_CREDENTIALS, region: env.AWS_REGION) {
+                            sh """
+                                # Login to ECR
+                                aws ecr get-login-password --region ${AWS_REGION} | \
+                                    docker login --username AWS --password-stdin ${DOCKER_REGISTRY}
+                            """
+                            
+                            // Push all service images
+                            env.SERVICES.split(',').each { service ->
+                                sh """
+                                    # Tag with version and latest
+                                    docker tag ${service}:${VERSION} ${DOCKER_REGISTRY}/${service}:${VERSION}
+                                    docker tag ${service}:${VERSION} ${DOCKER_REGISTRY}/${service}:${env.BRANCH_NAME}-latest
+                                    docker tag ${service}:${VERSION} ${DOCKER_REGISTRY}/${service}:build-${BUILD_NUMBER}
+                                    
+                                    # Push all tags
+                                    docker push ${DOCKER_REGISTRY}/${service}:${VERSION}
+                                    docker push ${DOCKER_REGISTRY}/${service}:${env.BRANCH_NAME}-latest
+                                    docker push ${DOCKER_REGISTRY}/${service}:build-${BUILD_NUMBER}
+                                    
+                                    echo "✅ Pushed ${service}:${VERSION}"
+                                """
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to Kubernetes') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'develop'
+                }
+            }
+            steps {
+                script {
+                    echo "☸️ Deploying to ${params.DEPLOY_ENVIRONMENT} environment..."
+                    container('kubectl') {
+                        withAWS(credentials: env.AWS_CREDENTIALS, region: env.AWS_REGION) {
+                            sh """
+                                # Update kubeconfig
+                                aws eks update-kubeconfig \
+                                    --name ${EKS_CLUSTER_NAME} \
+                                    --region ${AWS_REGION}
+                                
+                                # Create namespace if not exists
+                                kubectl create namespace ${K8S_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+                                
+                                # Apply configurations with kustomize or helm
+                                kubectl apply -f k8s/namespace.yml
+                                
+                                # Deploy each service
+                                for service in gateway-service user-service product-service order-service; do
+                                    kubectl apply -f k8s/\${service}/ -n ${K8S_NAMESPACE}
+                                    
+                                    # Update image
+                                    kubectl set image deployment/\${service} \
+                                        \${service}=${DOCKER_REGISTRY}/\${service}:${VERSION} \
+                                        -n ${K8S_NAMESPACE}
+                                    
+                                    # Scale replicas
+                                    kubectl scale deployment/\${service} \
+                                        --replicas=${params.REPLICAS} \
+                                        -n ${K8S_NAMESPACE}
+                                done
+                                
+                                # Apply ingress
+                                kubectl apply -f k8s/ingress.yml -n ${K8S_NAMESPACE}
+                            """
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Wait for Rollout') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'develop'
+                }
+            }
+            steps {
+                script {
+                    echo "⏳ Waiting for deployment rollout..."
+                    container('kubectl') {
+                        timeout(time: 10, unit: 'MINUTES') {
+                            sh """
+                                kubectl rollout status deployment/gateway-service -n ${K8S_NAMESPACE} --timeout=5m
+                                kubectl rollout status deployment/user-service -n ${K8S_NAMESPACE} --timeout=5m
+                                kubectl rollout status deployment/product-service -n ${K8S_NAMESPACE} --timeout=5m
+                                kubectl rollout status deployment/order-service -n ${K8S_NAMESPACE} --timeout=5m
+                            """
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Smoke Tests') {
+            when {
+                expression { env.ENABLE_SMOKE_TESTS == 'true' }
+                anyOf {
+                    branch 'main'
+                    branch 'develop'
+                }
+            }
+            steps {
+                script {
+                    echo "🔥 Running smoke tests..."
+                    sleep(time: 30, unit: 'SECONDS') // Wait for services to be ready
+                    
+                    container('kubectl') {
+                        sh """
+                            # Check pod status
+                            kubectl get pods -n ${K8S_NAMESPACE}
+                            
+                            # Verify all pods are running
+                            kubectl wait --for=condition=ready pod \
+                                -l app=gateway-service \
+                                -n ${K8S_NAMESPACE} \
+                                --timeout=2m
+                            
+                            # Get service endpoint
+                            GATEWAY_URL=\$(kubectl get svc gateway-service -n ${K8S_NAMESPACE} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+                            
+                            # Test health endpoints
+                            curl -f http://\${GATEWAY_URL}:8080/actuator/health || exit 1
+                            
+                            echo "✅ Smoke tests passed!"
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Performance Tests') {
+            when {
+                expression { env.ENABLE_PERFORMANCE_TESTS == 'true' && env.BRANCH_NAME == 'main' }
+            }
+            steps {
+                script {
+                    echo "⚡ Running performance tests with JMeter/Gatling..."
+                    // Add your performance testing tool here
+                    sh '''
+                        # Example: Run Gatling tests
+                        # mvn gatling:test
+                        echo "Performance tests would run here"
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                echo "🧹 Cleaning up workspace..."
+                cleanWs()
+                
+                // Collect metrics for monitoring
+                collectMetrics()
+            }
+        }
+        
+        success {
+            script {
+                echo "✅ Pipeline completed successfully!"
+                
+                // Notifications
+                notifySuccess()
+                
+                // Update deployment tracking
+                if (env.BRANCH_NAME == 'main') {
+                    createGitTag()
+                }
+            }
+        }
+        
+        failure {
+            script {
+                echo "❌ Pipeline failed!"
+                notifyFailure()
+                
+                // Rollback if needed
+                if (env.BRANCH_NAME == 'main' && currentBuild.previousBuild?.result == 'SUCCESS') {
+                    triggerRollback()
+                }
+            }
+        }
+        
+        unstable {
+            script {
+                echo "⚠️ Pipeline unstable!"
+                notifyUnstable()
+            }
+        }
+        
+        aborted {
+            script {
+                echo "🛑 Pipeline aborted!"
+                notifyAborted()
+            }
+        }
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+def buildAndScanDockerImage(serviceName) {
+    echo "🐳 Building Docker image for ${serviceName}..."
+    
+    container('docker') {
+        dir(serviceName) {
+            sh """
+                # Build with BuildKit for better caching
+                DOCKER_BUILDKIT=1 docker build \
+                    --build-arg BUILD_DATE=\$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
+                    --build-arg VCS_REF=${GIT_COMMIT_SHORT} \
+                    --build-arg VERSION=${VERSION} \
+                    --label org.opencontainers.image.created=\$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
+                    --label org.opencontainers.image.version=${VERSION} \
+                    --label org.opencontainers.image.revision=${GIT_COMMIT_SHORT} \
+                    --cache-from ${DOCKER_REGISTRY}/${serviceName}:${env.BRANCH_NAME}-latest \
+                    -t ${serviceName}:${VERSION} \
+                    -t ${serviceName}:latest \
+                    .
+            """
+            
+            // Security scan with Trivy
+            if (env.ENABLE_SECURITY_SCAN == 'true') {
+                echo "🔒 Scanning ${serviceName} for vulnerabilities..."
+                sh """
+                    trivy image \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 0 \
+                        --format table \
+                        ${serviceName}:${VERSION}
+                    
+                    # Generate JSON report
+                    trivy image \
+                        --severity HIGH,CRITICAL \
+                        --format json \
+                        --output trivy-${serviceName}.json \
+                        ${serviceName}:${VERSION}
+                """
+                
+                archiveArtifacts artifacts: "trivy-${serviceName}.json", allowEmptyArchive: true
+            }
+        }
+    }
+}
+
+def notifyBuildStart() {
+    // Slack notification
+    slackSend(
+        channel: env.SLACK_CHANNEL,
+        color: '#439FE0',
+        message: "🚀 Starting build: ${env.JOB_NAME} #${env.BUILD_NUMBER}\nBranch: ${env.BRANCH_NAME}\nAuthor: ${env.GIT_AUTHOR}"
+    )
+}
+
+def notifySuccess() {
+    emailext(
+        subject: "✅ Build Success: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+        body: """
+            <h2 style="color: green;">✅ Build Successful</h2>
+            <table>
+                <tr><td><strong>Job:</strong></td><td>${env.JOB_NAME}</td></tr>
+                <tr><td><strong>Build:</strong></td><td>#${env.BUILD_NUMBER}</td></tr>
+                <tr><td><strong>Branch:</strong></td><td>${env.BRANCH_NAME}</td></tr>
+                <tr><td><strong>Commit:</strong></td><td>${env.GIT_COMMIT_SHORT}</td></tr>
+                <tr><td><strong>Author:</strong></td><td>${env.GIT_AUTHOR}</td></tr>
+                <tr><td><strong>Duration:</strong></td><td>${currentBuild.durationString}</td></tr>
+                <tr><td><strong>Environment:</strong></td><td>${params.DEPLOY_ENVIRONMENT}</td></tr>
+            </table>
+            <p><a href="${env.BUILD_URL}">View Build</a> | <a href="${env.BUILD_URL}console">Console Output</a></p>
+        """,
+        recipientProviders: [developers(), requestor(), culprits()],
+        mimeType: 'text/html'
+    )
+    
+    slackSend(
+        channel: env.SLACK_CHANNEL,
+        color: 'good',
+        message: "✅ Build succeeded: ${env.JOB_NAME} #${env.BUILD_NUMBER}\nDuration: ${currentBuild.durationString}\n${env.BUILD_URL}"
+    )
+}
+
+def notifyFailure() {
+    emailext(
+        subject: "❌ Build Failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+        body: """
+            <h2 style="color: red;">❌ Build Failed</h2>
+            <table>
+                <tr><td><strong>Job:</strong></td><td>${env.JOB_NAME}</td></tr>
+                <tr><td><strong>Build:</strong></td><td>#${env.BUILD_NUMBER}</td></tr>
+                <tr><td><strong>Branch:</strong></td><td>${env.BRANCH_NAME}</td></tr>
+                <tr><td><strong>Commit:</strong></td><td>${env.GIT_COMMIT_SHORT}</td></tr>
+                <tr><td><strong>Author:</strong></td><td>${env.GIT_AUTHOR}</td></tr>
+            </table>
+            <p><strong>Action Required:</strong> Please check the console output for errors.</p>
+            <p><a href="${env.BUILD_URL}console">View Console Output</a></p>
+        """,
+        recipientProviders: [developers(), requestor(), culprits()],
+        mimeType: 'text/html'
+    )
+    
+    slackSend(
+        channel: env.SLACK_CHANNEL,
+        color: 'danger',
+        message: "❌ Build failed: ${env.JOB_NAME} #${env.BUILD_NUMBER}\nBranch: ${env.BRANCH_NAME}\n${env.BUILD_URL}console"
+    )
+}
+
+def notifyUnstable() {
+    slackSend(
+        channel: env.SLACK_CHANNEL,
+        color: 'warning',
+        message: "⚠️ Build unstable: ${env.JOB_NAME} #${env.BUILD_NUMBER}\n${env.BUILD_URL}"
+    )
+}
+
+def notifyAborted() {
+    slackSend(
+        channel: env.SLACK_CHANNEL,
+        color: '#808080',
+        message: "🛑 Build aborted: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+    )
+}
+
+def createGitTag() {
+    echo "🏷️ Creating Git tag for release..."
+    sh """
+        git tag -a v${VERSION} -m "Release version ${VERSION}"
+        git push origin v${VERSION}
+    """
+}
+
+def triggerRollback() {
+    echo "🔄 Triggering rollback to previous version..."
+    // Implement rollback logic here
+    container('kubectl') {
+        sh """
+            kubectl rollout undo deployment/gateway-service -n ${K8S_NAMESPACE}
+            kubectl rollout undo deployment/user-service -n ${K8S_NAMESPACE}
+            kubectl rollout undo deployment/product-service -n ${K8S_NAMESPACE}
+            kubectl rollout undo deployment/order-service -n ${K8S_NAMESPACE}
+        """
+    }
+}
+
+def collectMetrics() {
+    // Send metrics to monitoring system (Prometheus, DataDog, etc.)
+    echo "📊 Collecting build metrics..."
+}
